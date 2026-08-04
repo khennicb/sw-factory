@@ -8,7 +8,26 @@
       "Bash(sudo -n true)",
       "Bash(curl -fsSL https://get.docker.com -o /tmp/get-docker.sh)",
       "Bash(echo \"exit:$?\")",
-      "Bash(sudo sh /tmp/get-docker.sh)"
+      "Bash(sudo sh /tmp/get-docker.sh)",
+      "Bash(go version *)",
+      "Bash(set -e)",
+      "Read(//tmp/**)",
+      "Bash(curl -s -L -o go.tar.gz https://go.dev/dl/go1.26.5.linux-arm64.tar.gz)",
+      "Bash(tar -C /home/bkhennic -xzf go.tar.gz)",
+      "Bash(mv /home/bkhennic/go /home/bkhennic/go-sdk)",
+      "Bash(mkdir -p services/workflow-engine/cmd/worker)",
+      "Bash(mkdir -p services/workflow-engine/cmd/starter)",
+      "Bash(mkdir -p services/workflow-engine/internal/workflow)",
+      "Bash(mkdir -p services/workflow-engine/internal/activity)",
+      "Bash(mkdir -p services/transition-router)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/pip install *)",
+      "Bash(sudo docker compose -f /home/bkhennic/sw-factory/temporal/docker-compose.yml ps 2>&1)",
+      "Bash(nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 9101)",
+      "Bash(disown)",
+      "Bash(curl -s -X POST http://localhost:9101/rpc/ping -H 'Content-Type: application/json' -d '{\"taskId\":\"smoke\",\"message\":\"hi\"}')",
+      "Bash(curl -s http://localhost:9101/healthz)",
+      "Bash(sudo docker exec temporal-admin-tools temporal workflow show --workflow-id hello-world-1785885839)"
     ]
   }
 }

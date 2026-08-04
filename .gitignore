@@ -1,0 +1,12 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Python (agents/service and future agent processes)
+.venv/
+__pycache__/
+*.pyc
+
+# Local env overrides
+.env
