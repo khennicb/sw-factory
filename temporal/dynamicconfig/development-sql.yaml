@@ -1,0 +1,15 @@
+frontend.enableUpdateWorkflowExecution:
+  - value: true
+    constraints: {}
+frontend.enableUpdateWorkflowExecutionAsyncAccepted:
+  - value: true
+    constraints: {}
+system.enableActivityEagerExecution:
+  - value: true
+    constraints: {}
+system.enableEagerWorkflowStart:
+  - value: true
+    constraints: {}
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}

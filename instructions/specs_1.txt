@@ -1,0 +1,866 @@
+# AI Software Factory - Architecture Specification (v1)
+
+This document describes the architecture of an autonomous AI software factory capable of implementing a software project from a high-level specification. The objective is **not** to replace a software engineer, but to automate the software development pipeline while keeping the system observable, deterministic where possible, and adaptive where reasoning is required.
+
+---
+
+# 1. High-level philosophy
+
+The system is **not** a single autonomous agent.
+
+Instead, it is composed of specialized agents coordinated by a deterministic workflow engine.
+
+The workflow itself is deterministic.
+
+The decisions made inside the workflow are delegated to AI.
+
+In other words:
+
+```
+Workflow
+    decides WHEN
+
+AI
+    decides HOW
+```
+
+This separation keeps the system debuggable while allowing it to adapt when necessary.
+
+---
+
+# 2. Core principles
+
+The system follows these principles.
+
+## Small iterations
+
+No feature should be implemented in one PR.
+
+A feature is decomposed into many small tasks.
+
+Each task becomes one GitHub Issue and one Pull Request.
+
+A task should ideally modify only a limited number of files and implement one coherent responsibility.
+
+---
+
+## Continuous validation
+
+The objective is **not** to finish implementation.
+
+The objective is to satisfy every quality gate.
+
+Implementation, review and testing can iterate until all gates are satisfied.
+
+---
+
+## State-driven workflow
+
+The workflow is represented as a state machine.
+
+The workflow is never hardcoded as:
+
+```
+Implement
+Review
+Test
+Done
+```
+
+Instead, every task progresses through states.
+
+Transitions are dynamic.
+
+---
+
+## Deterministic orchestration
+
+Git operations, GitHub operations, deployments, CI, waiting for webhooks and scheduling are deterministic.
+
+Only reasoning tasks are delegated to AI.
+
+---
+
+## Observable system
+
+Every decision is recorded.
+
+Every transition is visible.
+
+Every AI answer is attached to the workflow history.
+
+Nothing should happen silently.
+
+---
+
+# 3. Overall architecture
+
+```
+                       Scheduler
+                            │
+                    Project Workflow
+                            │
+                 Story Generation Workflow
+                            │
+             ┌──────────────┴──────────────┐
+             │                             │
+      Story Workflow                 Story Workflow
+             │                             │
+      Task Workflow                 Task Workflow
+             │                             │
+             ▼                             ▼
+
+      AI Agents + Repository Intelligence + GitHub + CI
+```
+
+Temporal (or an equivalent orchestration engine) orchestrates every workflow.
+
+Each task is completely isolated.
+
+A failure in one task never blocks unrelated tasks.
+
+---
+
+# 4. Components
+
+The system consists of several independent services.
+
+## Workflow Engine
+
+Responsibilities:
+
+* execute workflows
+* store workflow history
+* retry failed activities
+* wait for external events
+* expose workflow state
+* provide observability
+
+The workflow engine contains **no business intelligence**.
+
+It only coordinates activities.
+
+---
+
+## Transition Router
+
+Deterministic. Not an AI.
+
+Selects the next task state.
+
+Given:
+
+* the current state
+* the verdict produced by whichever agent or integration just ran (e.g. Review Agent's `Approved` / `Changes Requested` / `Escalate`, Test Analysis Agent's `Fixable` / `Unfixable`, CI status, deployment status)
+* budget status (§11)
+
+It applies the transition table (§8) to select the next state.
+
+Responsibilities:
+
+* validate the proposed transition against the state machine
+* enforce budgets — exceeding a budget forces `HUMAN_REVIEW` or `FAILED`
+* record the reason for every transition
+
+The router performs no reasoning of its own. Every judgment call — is this reviewable, is this fixable, is this good enough to merge — is made by the specialized agent or integration that produced the verdict, not by the router. This keeps orchestration fully deterministic, per §1.
+
+---
+
+## Repository Intelligence
+
+This service is responsible for understanding the repository.
+
+It is **not** an AI.
+
+It provides context.
+
+Responsibilities:
+
+* project documentation
+* repository map
+* dependency graph
+* module index
+* architecture summaries
+* coding conventions
+* recent merged PRs
+* feature ownership
+* similar implementations
+
+Every AI agent requests context from Repository Intelligence instead of reading the whole repository.
+
+---
+
+## AI Router
+
+The router decides which model should execute a task.
+
+Inputs:
+
+* task type
+* estimated complexity
+* confidence
+* token budget
+
+Possible outputs:
+
+```
+Local model
+
+or
+
+Remote model
+```
+
+Simple work remains local.
+
+Complex architectural reasoning is offloaded.
+
+---
+
+## GitHub Integration
+
+Responsible for:
+
+* Issues
+* Pull Requests
+* Labels
+* Comments
+* Reviews
+* Merge
+* Releases
+
+No AI logic.
+
+---
+
+## CI Integration
+
+Responsible for:
+
+* build
+* lint
+* tests
+* coverage
+* security
+* artifacts
+
+---
+
+## Deployment Integration
+
+Responsible for:
+
+* deployment
+* rollback
+* deployment logs
+* deployment status
+
+---
+
+## Browser Testing
+
+Runs end-to-end validation.
+
+Typically Playwright.
+
+Produces:
+
+* screenshots
+* traces
+* logs
+* failures
+
+---
+
+# 5. Repository structure
+
+The repository contains two documentation layers.
+
+## Human documentation
+
+```
+docs/
+
+architecture.md
+
+frontend.md
+
+backend.md
+
+database.md
+
+features/
+
+api/
+```
+
+Designed for developers.
+
+---
+
+## AI documentation
+
+```
+.ai/
+
+module_index.md
+
+repository_map.md
+
+dependency_map.md
+
+decision_log.md
+
+recent_changes.md
+
+coding_style.md
+
+architecture_summary.md
+```
+
+Optimized for AI consumption.
+
+This documentation is continuously updated.
+
+---
+
+# 6. Agents
+
+Agents never call one another directly.
+
+They only receive inputs and produce outputs.
+
+---
+
+## Planning Agent
+
+Input:
+
+* feature description
+
+Responsibilities:
+
+* understand feature
+* identify user stories
+* acceptance criteria
+* estimate complexity
+
+Produces:
+
+* GitHub Issues
+
+---
+
+## Task Decomposition Agent
+
+Input:
+
+* one user story
+
+Responsibilities:
+
+Split into independent implementation tasks.
+
+Produces:
+
+* task list
+
+Each task should be mergeable independently.
+
+---
+
+## Repository Context Agent
+
+Responsibilities:
+
+Given a task:
+
+Return:
+
+* documentation
+* relevant modules
+* relevant files
+* similar code
+* architecture notes
+
+This minimizes token usage.
+
+---
+
+## Implementation Agent
+
+Responsibilities:
+
+* understand task
+* read context
+* modify code
+* create commit
+* update PR
+
+Does not review itself.
+
+---
+
+## Review Agent
+
+Independent from implementation.
+
+Checks:
+
+* architecture
+* readability
+* maintainability
+* conventions
+* security
+* missing tests
+
+Produces:
+
+```
+Approved
+
+or
+
+Review findings
+```
+
+---
+
+## Test Analysis Agent
+
+Interprets failures.
+
+Examples:
+
+* compilation failure
+* failing unit test
+* Playwright failure
+
+Determines likely cause.
+
+---
+
+## Documentation Agent
+
+Updates:
+
+Human documentation.
+
+AI documentation.
+
+Architecture summaries.
+
+Decision logs.
+
+---
+
+# 7. Workflow hierarchy
+
+Three workflow levels exist.
+
+---
+
+## Project Workflow
+
+Represents one software project.
+
+Responsibilities:
+
+* generate stories
+* schedule stories
+* monitor progress
+
+---
+
+## Story Workflow
+
+Represents one user story.
+
+Responsibilities:
+
+* decompose tasks
+* launch task workflows
+* wait for completion
+
+Completion:
+
+Every task merged.
+
+---
+
+## Task Workflow
+
+Represents one Pull Request.
+
+This is the heart of the system.
+
+---
+
+# 8. Task state machine
+
+Every task progresses through the following states.
+
+---
+
+## CREATED
+
+Task exists.
+
+No work started.
+
+Possible transitions:
+
+```
+READY
+
+CANCELLED
+```
+
+---
+
+## READY
+
+Waiting for execution.
+
+Possible transitions:
+
+```
+COLLECT_CONTEXT
+```
+
+---
+
+## COLLECT_CONTEXT
+
+Repository Intelligence prepares context.
+
+Produces:
+
+* documentation
+* files
+* architecture
+
+Possible transitions:
+
+```
+IMPLEMENTING
+```
+
+---
+
+## IMPLEMENTING
+
+Implementation Agent edits the repository.
+
+Possible transitions:
+
+```
+REVIEWING
+
+TESTING
+
+FAILED
+```
+
+---
+
+## REVIEWING
+
+Review Agent analyzes the implementation.
+
+Possible outputs:
+
+```
+APPROVED
+
+CHANGES_REQUESTED
+
+ESCALATE
+```
+
+Transitions:
+
+```
+IMPLEMENTING
+
+TESTING
+
+HUMAN_REVIEW
+```
+
+---
+
+## TESTING
+
+Runs:
+
+* CI
+* unit tests
+* integration tests
+* browser tests
+
+Possible transitions:
+
+```
+IMPLEMENTING
+
+READY_TO_MERGE
+
+FAILED
+```
+
+---
+
+## DOCUMENTING
+
+Documentation Agent updates:
+
+* docs
+* .ai
+
+Possible transitions:
+
+```
+READY_TO_MERGE
+```
+
+---
+
+## READY_TO_MERGE
+
+Quality gates satisfied.
+
+Possible transitions:
+
+```
+MERGING
+```
+
+---
+
+## MERGING
+
+Merge PR.
+
+Deploy.
+
+Possible transitions:
+
+```
+DEPLOYING
+```
+
+---
+
+## DEPLOYING
+
+Deploy application.
+
+Possible transitions:
+
+```
+VALIDATING_DEPLOYMENT
+
+FAILED
+```
+
+---
+
+## VALIDATING_DEPLOYMENT
+
+Smoke tests.
+
+Browser tests.
+
+Monitoring.
+
+Possible transitions:
+
+```
+DONE
+
+ROLLBACK
+```
+
+---
+
+## ROLLBACK
+
+Restore previous deployment.
+
+Open issue.
+
+Task marked failed.
+
+---
+
+## HUMAN_REVIEW
+
+Workflow paused.
+
+Await human intervention.
+
+Can later resume.
+
+---
+
+## DONE
+
+Task completed successfully.
+
+---
+
+## FAILED
+
+Irrecoverable failure.
+
+Workflow ends.
+
+---
+
+# 9. Dynamic transitions
+
+The state graph is intentionally non-linear.
+
+Examples:
+
+```
+IMPLEMENTING
+        ↓
+REVIEWING
+        ↓
+IMPLEMENTING
+        ↓
+TESTING
+        ↓
+IMPLEMENTING
+        ↓
+REVIEWING
+        ↓
+DOCUMENTING
+        ↓
+MERGE
+```
+
+Another task may go:
+
+```
+IMPLEMENTING
+        ↓
+TESTING
+        ↓
+IMPLEMENTING
+        ↓
+DOCUMENTING
+        ↓
+MERGE
+```
+
+The workflow is adaptive.
+
+---
+
+# 10. Quality gates
+
+A task can only merge when every mandatory gate passes.
+
+Mandatory gates:
+
+* Implementation complete
+* Review approved
+* CI passing
+* Unit tests passing
+* Browser tests passing
+* Documentation updated
+* Deployment successful
+
+Optional gates may include:
+
+* Coverage threshold
+* Performance benchmarks
+* Accessibility checks
+* Security scans
+
+---
+
+# 11. Budgets
+
+Every task has budgets.
+
+Examples:
+
+* Maximum AI tokens
+* Maximum local iterations
+* Maximum remote escalations
+* Maximum workflow duration
+* Maximum review cycles
+* Maximum test retries
+
+Budgets prevent infinite loops and runaway costs.
+
+Exceeding a budget transitions to **HUMAN_REVIEW** or **FAILED**, depending on policy.
+
+---
+
+# 12. Model routing
+
+The router chooses the most appropriate model based on the work to perform.
+
+Typical strategy:
+
+* Local model for planning, code generation, review, documentation, and routine fixes.
+* Remote model only for high-complexity reasoning, architectural decisions, or when repeated local attempts fail.
+
+Escalation should also consider:
+
+* Confidence of the previous result.
+* Number of failed attempts.
+* Remaining token budget.
+* Estimated impact of getting the decision wrong.
+
+The routing policy should be configurable so newer local models can gradually replace remote usage as they improve.
+
+---
+
+# 13. Long-term knowledge
+
+The repository itself becomes the system's memory.
+
+Knowledge is accumulated through:
+
+* Documentation in `docs/`.
+* AI-oriented summaries in `.ai/`.
+* Decision logs explaining architectural choices.
+* Recent change summaries after every merge.
+
+The system should avoid relying on hidden conversational memory. A fresh workflow should be able to understand the project by reading the repository and its generated documentation.
+
+---
+
+# 14. Observability
+
+Every workflow execution should produce a complete audit trail, including:
+
+* State transitions.
+* Activities executed.
+* AI prompts (or references to stored prompts).
+* AI responses.
+* Model used (local or remote).
+* Token consumption.
+* Confidence estimates (if available).
+* Review outcomes.
+* Test results.
+* Deployment status.
+* Reasons for every transition.
+
+Temporal's history and UI become the primary operational dashboard, making it possible to understand *why* a task succeeded, failed, or looped without digging through logs.
+
+---
+
+## Final design philosophy
+
+The resulting system is **not** an autonomous programmer making arbitrary decisions. It is a software factory composed of deterministic infrastructure and specialized AI workers.
+
+The deterministic components provide reliability, reproducibility, and observability. The AI components contribute reasoning where automation cannot be expressed as rules. By combining these two aspects—and constraining AI decisions within a well-defined state machine—the system remains adaptable enough to improve its work through iteration while staying predictable enough to run unattended overnight. This balance is the core architectural principle that should guide every future extension of the platform.
+
+

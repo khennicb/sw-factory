@@ -1,0 +1,67 @@
+services:
+  postgresql:
+    image: postgres:13
+    container_name: temporal-postgresql
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+    volumes:
+      - postgresql-data:/var/lib/postgresql/data
+    networks:
+      - temporal-network
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: temporal
+    restart: unless-stopped
+    depends_on:
+      - postgresql
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    networks:
+      - temporal-network
+
+  temporal-admin-tools:
+    image: temporalio/admin-tools:latest
+    container_name: temporal-admin-tools
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    stdin_open: true
+    tty: true
+    networks:
+      - temporal-network
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    container_name: temporal-ui
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "0.0.0.0:8080:8080"
+    networks:
+      - temporal-network
+
+networks:
+  temporal-network:
+    name: temporal-network
+
+volumes:
+  postgresql-data:

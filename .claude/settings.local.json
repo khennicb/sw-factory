@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(ip addr *)",
+      "Read(//usr/lib/**)",
+      "Bash(sudo -n true)",
+      "Bash(curl -fsSL https://get.docker.com -o /tmp/get-docker.sh)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(sudo sh /tmp/get-docker.sh)"
+    ]
+  }
+}

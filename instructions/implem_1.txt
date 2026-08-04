@@ -1,0 +1,188 @@
+# First 3–4 Steps to Implement This Autonomous Software Factory
+
+This is a well-thought-out specification. The key insight is that **the deterministic workflow engine comes first, AI comes last**. You need the rails before you let the train run.
+
+Here's the order I'd tackle this:
+
+---
+
+## Step 1: Bootstrap the Workflow Engine Infrastructure
+
+Before any agent writes a line of code, you need the orchestration backbone running.
+
+**What to do:**
+- Set up **Temporal Server** (local dev with `temporal dev-server`, Docker Compose for staging)
+- Create a monorepo structure with the following modules:
+  ```
+  services/
+    workflow-engine/
+    transition-router/
+    repository-intelligence/
+    ai-router/
+    github-integration/
+    ci-integration/
+    deployment-integration/
+    browser-testing/
+  agents/
+    planning/
+    task-decomposition/
+    repository-context/
+    implementation/
+    review/
+    test-analysis/
+    documentation/
+  .ai/
+  docs/
+  ```
+- Implement a **"hello world" Temporal workflow** that can execute a simple sequence of activities
+- Write the base `Activity` interfaces in **Go** (Temporal Go SDK) — that's the committed language for the workflow engine and every activity shim
+- Decide the runtime boundary now: the `agents/*` packages are **not** Go code. They're a separate service reachable over gRPC/HTTP, so implementations can use whichever LLM SDK/language fits best (most agent SDKs are strongest in Python/TS) without coupling the orchestration layer to it. Each `agents/<name>` activity in Go is a thin shim that makes an RPC call and returns the typed result
+- Add telemetry boilerplate (OpenTelemetry → Tempo or similar) so you can see the workflow graph from day one
+
+**Why first:** Every other component will be called as Temporal activities. If the orchestration layer isn't stable, nothing is.
+
+**Output:** A running Temporal dev server + a workflow that can dispatch activities with retries and history. You can test this with a trivial "ping" activity.
+
+---
+
+## Step 2: Implement the Task State Machine as Code
+
+The state machine in §8 is the **most critical data structure** in the system. Code it first, test it thoroughly, and only then wire it into workflows.
+
+**What to do:**
+- Model every state from `CREATED` → `FAILED` as an enum/union type
+- Model every valid transition (use the spec's diagrams + add missing guard conditions)
+- Implement a **transition validator** that rejects illegal transitions (e.g., `CREATED → MERGING` should be impossible)
+- Implement **budget tracking** (§11): token budget, iteration count, time-to-live per task
+- Add a **transition log** (append-only list of `{from, to, reason, timestamp, actor}`)
+
+```go
+// Example transition matrix (not exhaustive — yours covers ~18 states)
+var Transitions = map[State][]State{
+    StateCreated:        {StateReady, StateCancelled},
+    StateReady:          {StateCollectContext, StateCancelled},
+    StateCollectContext: {StateImplementing},
+    StateImplementing:   {StateReviewing, StateTesting, StateFailed},
+    StateReviewing:      {StateImplementing, StateTesting, StateHumanReview},
+    StateTesting:        {StateImplementing, StateReadyToMerge, StateFailed},
+    // ... all other states
+}
+```
+
+**Why second:** The state machine is the **contract** the Transition Router (Step 4) will later use to pick transitions. You can't build the router without a validated state model. Also, this is pure logic — zero AI dependency — so you can unit-test it exhaustively.
+
+**Output:** A library/package `statemachine` with `isValidTransition(from, to) → bool`, `applyTransition(task, to) → task`, and budget enforcement. 100% test coverage.
+
+---
+
+## Step 3: Build the GitHub Integration Service (Stub + Core)
+
+The entire workflow revolves around GitHub Issues and PRs (§4. "GitHub Integration"). You need this working to test any end-to-end flow.
+
+**What to do:**
+- Implement the full GitHub API client wrapper (or use `go-github` / similar library)
+- Implement these operations as **Temporal activities**:
+  - `CreateIssue(taskId, title, body, labels) → issueURL`
+  - `CreatePullRequest(taskId, branch, title, body) → prURL`
+  - `AddComment(prURL, body) → void`
+  - `RequestReviewers(prURL, reviewers) → void`
+  - `MergePR(prURL, method) → void`
+  - `GetPRStatus(prURL) → {checks, reviews, mergeable}`
+- Make `CreateIssue` and `CreatePullRequest` idempotent via **check-then-create**: before calling the GitHub API, search for an existing issue/PR carrying this `taskId` (e.g. a `task-id:<id>` marker in the body, or a deterministic branch name for PRs). If found, return its URL instead of creating a duplicate. This is what protects you when Temporal retries the activity after a timeout that happened *after* GitHub created the object but *before* the response came back
+- Add a **GitHub Webhook Receiver** instead of a polling `WaitForCI` activity — see below
+- Add a **test mode** that uses a mock GitHub API (in-memory repo simulation) so you can integration-test workflows without hitting real GitHub
+- Implement the **Repository Intelligence** service as a stub returning canned data, but lock its interface now so Step 5 can swap in the real implementation with zero changes to any agent:
+  ```go
+  type RepositoryIntelligence interface {
+      GetContext(ctx context.Context, taskID string) (Context, error)
+  }
+
+  type Context struct {
+      Docs                   []DocRef
+      Files                  []FileRef
+      ArchitectureNotes      []string
+      SimilarImplementations []CodeRef
+      CodingConventions      string
+  }
+  ```
+
+**Why third:** Without GitHub integration, your workflows can't create PRs, which means you can't test the `IMPLEMENTING → REVIEWING → TESTING → MERGING` loop. The stub mode is essential because you don't want to burn real CI credits during early development.
+
+**Output:** A `github-integration` service with both real and mock modes, idempotent create-activities, and a webhook receiver wired to Temporal signals. A `repository-intelligence` stub returning canned data against a locked interface. The first end-to-end Temporal workflow — `CREATED → READY → COLLECT_CONTEXT → IMPLEMENTING → REVIEWING → ... → MERGING` using mocks — with the transition sequence still **hardcoded/linear** at this point (no branching): the Transition Router that makes it dynamic doesn't exist until Step 4.
+
+---
+
+### GitHub webhook, not polling, for CI status
+
+Replace `WaitForCI(prURL, timeout) → status` with a webhook-driven signal instead of a blocking/polling activity — spec §4 already lists "wait for external events" as a Workflow Engine responsibility, and a long-lived polling activity ties up a worker slot for the wrong reason.
+
+- Stand up a small HTTP endpoint inside `github-integration` (e.g. `POST /webhooks/github`) registered against the repo for `check_suite`, `check_run`, and `pull_request_review` events. Verify the GitHub webhook signature (`X-Hub-Signature-256`) before trusting the payload
+- When `CreatePullRequest` runs, store the mapping `{prURL / commit SHA → workflowId}` (a small key-value lookup is enough) so the webhook handler knows which workflow to notify
+- On a matching event, the handler calls Temporal's `SignalWorkflow(workflowId, "ciStatusUpdated", {status, conclusion, url})` — no activity involved, just a client-side signal call
+- In the Task Workflow, while in `TESTING`, block on `workflow.GetSignalChannel("ciStatusUpdated").Receive(ctx)` instead of polling. Race it against a workflow timer (e.g. 30 min) as a fallback: if no webhook arrives in time, fall back to one `GetPRStatus` polling call as a safety net, then transition to `HUMAN_REVIEW` if that's still inconclusive
+- In test mode, the mock GitHub API fires the same signal directly instead of hitting a real webhook, so this path is testable without any external dependency
+
+---
+
+## Step 4: Implement the Transition Router (Still No AI)
+
+Not a Foreman — a **Transition Router**. It never decides *what to think*, only *which edge of the state graph to take*, based on a verdict some other component already produced.
+
+**What to do:**
+- Define the verdict contracts each future agent/integration will emit — plain enums, no free text:
+  - Review Agent → `Approved | ChangesRequested | Escalate`
+  - Test Analysis Agent → `Fixable | Unfixable | Escalate`
+  - CI Integration → `Passed | Failed`
+  - Deployment Integration → `Succeeded | Failed`
+- Implement the router as a pure function on top of the Step 2 state machine:
+  ```go
+  func Route(currentState State, verdict Verdict, budget BudgetStatus) State {
+      if budget.Exceeded {
+          if budget.Policy == PolicyStrict {
+              return StateFailed
+          }
+          return StateHumanReview
+      }
+      return TransitionsByVerdict[currentState][verdict] // built from Step 2's matrix
+  }
+  ```
+- Validate the result against `isValidTransition` (Step 2) before applying it — the router must not be able to propose an illegal transition even if a verdict is malformed
+- Since no real agents exist yet, feed the router **stubbed verdicts** (canned or randomized) so every branch of the state graph gets exercised, including budget-exceeded → `HUMAN_REVIEW`/`FAILED`
+- Wire the router into the Task Workflow: after every activity completes, call the router with the activity's verdict + current budget state, log `{from, to, verdict, reason}` to the transition log (Step 2)
+- Specify how `HUMAN_REVIEW` resumes: expose a `resumeWithVerdict(verdict, note?)` **Temporal signal** on the Task Workflow. While in `HUMAN_REVIEW`, the workflow blocks on `workflow.GetSignalChannel("resumeWithVerdict").Receive(ctx)` — sent by a human via CLI/dashboard/API call, or by a maintainer commenting on the GitHub issue (parsed by the same webhook receiver from Step 3 into a signal). The received verdict is fed into `route()` exactly like any other verdict, so human intervention is just one more verdict source, not a special case in the router's logic
+
+**Why fourth:** This is still pure logic — zero AI, zero prompts, fully unit-testable. It proves the **Workflow → Router → State Machine** loop end to end using only mocks, and it pushes the *first* real AI component further down the roadmap: the actual judgment (is this reviewable, is this fixable) will be made by the specialized agents themselves when you build them, not by a separate orchestration AI.
+
+**Output:** A working Task Workflow that creates a PR via GitHub, runs mock CI, and cycles through every state — including retries, escalation, and rollback paths — driven entirely by deterministic code. You can watch the full state graph in Temporal's UI without a single LLM call having been made.
+
+---
+
+## Summary
+
+| Step | Component | AI or Deterministic? | Can test without other components? |
+|------|-----------|---------------------|-----------------------------------|
+| 1 | Temporal + project skeleton | Deterministic | Yes |
+| 2 | State machine as code | Deterministic | Yes (unit tests) |
+| 3 | GitHub integration + mock | Deterministic | Yes (with mock) |
+| 4 | Transition Router | Deterministic | Yes (stubbed verdicts + mock GitHub/CI) |
+
+After these 4 steps, you have a **working loop with zero AI dependency**:
+
+```
+Temporal → Activities (mocked) → Transition Router → State Machine → next Activities → ...
+```
+
+From there, you swap each stub/mock for real services in priority order — this is also where AI first enters the system:
+
+5. **Repository Intelligence** (real — querying the `.ai/` docs; still deterministic)
+6. **AI Router** (§12) + **Implementation Agent** — the first real AI component; generates code and reports success/failure to the Router
+7. **Review Agent** — produces the `Approved / ChangesRequested / Escalate` verdict the Router already knows how to consume
+8. **Test Analysis Agent** — produces the `Fixable / Unfixable / Escalate` verdict
+9. **CI Integration** (real)
+10. **Documentation Agent**
+11. **Browser Testing Agent**
+
+Because every agent's output was already defined as a router-consumable verdict in Step 4, plugging in each real agent is additive — no orchestration code changes as AI capability grows.
+
+Would you like me to elaborate on any of these steps — for example, the exact Temporal activity signatures needed, or the verdict schema each agent must emit?
+
